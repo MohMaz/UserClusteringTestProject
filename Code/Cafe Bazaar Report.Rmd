@@ -5,17 +5,13 @@ date: "May 14, 2016"
 output: html_document
 ---
 # Synposis
-In this research we want to analyse user payement data and cluster users in order to plan for promotions or solutions to make more money (Increase users long term value)!
-```{r,echo=FALSE}
+In this research we want to analyse user payment data and cluster users in order to plan for promotions or solutions to make more money (Increase users long term value)!
+```{r,echo=FALSE,warning=FALSE}
 suppressMessages(library(dplyr, warn.conflicts = FALSE, quietly=TRUE))
 suppressMessages(library(ggplot2, warn.conflicts = FALSE, quietly=TRUE))
 suppressMessages(library(grid, warn.conflicts = FALSE, quietly=TRUE))
 suppressMessages(library("data.table",warn.conflicts = FALSE, quietly=TRUE))
-# library(ggplot2)
-library(grid)
-# library(dplyr)
-# library(data.table)
-# library(grid)
+suppressMessages(library("recommenderlab",warn.conflicts = FALSE, quietly=TRUE))
 ```
 # Data Processing
 ### Generating Data
@@ -26,102 +22,203 @@ In this part we would simulate some data as input for our analysis.
 <li>_**typeFactor**_ is a factor including software types. in this analysis it's App or Game.</li>
 </p>
 We assume the data table would have one ID and 3 features:  
-_**type**_:  the payement was for an Application or a Game</br>
-_**amount**_:  the amount of payement</br>
-_**OrderDate**_:  payement date</br>
-It is assumed that installations with no payement are recorderd as _amount_ = 0.
-Also any payement is recorderd in the table.
+_**userID**_:
+_**cat**_:  the payment was for an Application or a Game</br>
+_**appID**_: A unique ID for each app
+_**amount**_:  the amount of payment</br>
+_**payDate**_:  payment date</br>
+_****_: 
+It is assumed that installations with no payment are recorderd as _amount_ = 0.
+Also any payment (including in-app purchases) is recorderd in the table.
 ```{r}
-n <- 3000
-numUsers <- 500
-typeFactor <- as.factor(c('App','Game'))
+n <- 1e6
+numUsers <- 1e4
+appCount <- 1e3
+typeFactor <- as.factor(1:10)
+set.seed(789)
 ```
 Let's generate the data:</br>
-for each record _CustID_ is sampled from user IDs. _type_ is set to App or Game with eual probability.for _amount_ variable 0.9 of records will have zero value (Installations with no payement) and others are assumed to be from a normal distribution with arbitary mean and std. at last _orderDate_ is sampled randomly between "2013/01/01" and "2016/01/01".
+for each record _userID_ is sampled from user IDs. _cat_ is app category._appID_ is a unique ID for each app which have been sampled randomly. for _amount_ variable 0.9 of records will have zero value (Installations with no payment) and others are assumed to be from a normal distribution with arbitary mean and std. at last _payDate_ is sampled randomly between "2013/01/01" and "2016/01/01".
 ```{r}
-orders <- 
-      data.table(CustID = sample(1:numUsers,size = n,replace = TRUE),
-                 type = sample(typeFactor,n,replace = TRUE, prob = c(0.5,0.5)),
+payments <- 
+      data.table(userID = sample(1:numUsers,size = n,replace = TRUE),
+                 cat = sample(typeFactor,replace = TRUE, prob = c(0.2,0.15,0.1,0.05,0.25,0.1,0.05,0.02,0.05,0.03)),
+                 appID = sample(1:appCount,replace = TRUE),
                  amount = round(sample(c(abs(rnorm(n = 0.1*n,mean = 3000,sd = 2000)),rep(0,0.9*n))),-2),
-                 OrderDate = sample(seq(
+                 payDate = sample(seq(
                        as.Date('2013/01/01'), 
                        as.Date('2016/01/01'), 
                        by="day"), n,replace = TRUE))
+
+# Ratings Matrix is Filled Randomly. 
+ratings = matrix(sample(0:5,numUsers*appCount,replace = TRUE,prob = c(0.9,0.02,0.02,0.02,0.02,0.02)),nrow = numUsers)
+ratings[ratings==0] <- NaN
 ```
 ### Convert Data to RFM Model
 One of the most useful techniques to analyse user purchase history is to use RFM Models. R,F and M stand for Recency,Frequency and Monetary respectively. In this part we want to convert our input data into RFM Features:  
-<li>_**FirstPurchaseDate**_: </li>
-<li>_**LastPurchaseDate**_: </li>
-<li>_**NumberofOrders**_: </li>
-<li>_**TypeCount**_: </li>
-<li>_**TotalAmount**_: </li>
+<li>_**FirstPurchaseDate**_: Roughly shows how long the user is with us.</li>
+<li>_**LastPurchaseDate**_: basis of Recency.</li>
+<li>_**Numberofpayments**_: basis of Frequency.</li>
+<li>_**CatCount**_: basis of breadth (Number of unique categories which user is involved)</li>
+<li>_**TotalAmount**_: basis of Monetary.</li>
 ```{r}
 # Building RFM Features
-RFM <- orders  %>% 
-      group_by(CustID)  %>% 
-      summarise(FirstPurchaseDate = min(OrderDate),
-                LastPurchaseDate = max(OrderDate),
-                NumberOrders = n(),
-                TypeCount = length(unique(type)) ,
+RFM <- payments  %>% 
+      group_by(userID)  %>% 
+      summarise(FirstPurchaseDate = min(payDate),
+                LastPurchaseDate = max(payDate),
+                NumberPayments = sum(amount > 0),
+                NumberofApps = length(unique(appID)),
+                Breadth = length(unique(cat)),
                 TotalAmount = sum(amount))
 
+
 LastDate <- max(RFM$LastPurchaseDate)
-RFM <- RFM %>% mutate(R = as.numeric(LastDate-LastPurchaseDate))
+RFM <- RFM %>% mutate(R = as.numeric(LastDate-LastPurchaseDate),
+                      PayRatio = NumberPayments / NumberofApps)
 
 ```
 #Analysis
 ##  Exploratory Data Analysis 
-```{r,echo=FALSE,warning=FALSE,error=FALSE}
-PlotRecency <- ggplot(RFM, aes(R %/% 7)) + geom_histogram(bins = 30) 
-PlotFreq <- ggplot(RFM, aes(NumberOrders)) + geom_histogram()
-PlotMonetary <- ggplot(RFM, aes(TotalAmount)) + geom_histogram()
-PlotBreadth <- ggplot(RFM, aes(TypeCount)) + geom_histogram()
-PlotTenure <- ggplot(RFM, aes(as.numeric(LastDate - FirstPurchaseDate) %/% 7)) + geom_histogram()
+In this section we draw some EDA plots for RFM data.
+```{r,echo=FALSE,warning=FALSE}
+PlotRecency <- ggplot(RFM, aes(R %/% 7)) + geom_histogram(binwidth = 3) 
+PlotRecency <- PlotRecency + labs(x = 'Recency(Weeks Ago)' , y = 'Customer Count', title = 'Recency')
+
+PlotFreq <- ggplot(RFM, aes(NumberPayments)) + geom_histogram(binwidth = 1)
+PlotFreq <- PlotFreq + labs(x = 'Number of payments' , y = 'Customer Count', title = 'Frequency')
+
+PlotMonetary <- ggplot(RFM, aes(TotalAmount)) + geom_histogram(binwidth = 1000)
+PlotMonetary <- PlotMonetary  + labs(x = 'Total Amount (Tomans)' , y = 'Customer Count', title = 'Total Payement(Monetary)')
+
+PlotNumApp <- ggplot(RFM,aes(NumberofApps)) + geom_histogram(binwidth = 5)
+PlotNumApp <- PlotNumApp + labs(x = 'Number of Installed Apps', y = 'count', title = 'Installed Apps')
+
+PlotTenure <- ggplot(RFM, aes(as.numeric(LastDate - FirstPurchaseDate) %/% 7)) + geom_histogram(binwidth = 1)
+PlotTenure <- PlotTenure + labs(x = 'First payment (Weeks Ago)' , y = 'Customer Count', title = 'Tenure')
+
 grid.newpage()
 pushViewport(viewport(layout = grid.layout(3, 2)))
 print(PlotRecency, vp = viewport(layout.pos.row = 1,layout.pos.col = 1))
-print(PlotFreq, vp = viewport(layout.pos.row = 1,layout.pos.col = 2))
-print(PlotMonetary, vp = viewport(layout.pos.row = 2,layout.pos.col = 1))
-print(PlotBreadth, vp = viewport(layout.pos.row = 2,layout.pos.col = 2))
-print(PlotTenure, vp = viewport(layout.pos.row = 3,layout.pos.col = 1))
+print(PlotTenure, vp = viewport(layout.pos.row = 1,layout.pos.col = 2))
+print(PlotNumApp, vp = viewport(layout.pos.row = 2,layout.pos.col = 1))
+print(PlotFreq, vp = viewport(layout.pos.row = 2,layout.pos.col = 2))
+print(PlotMonetary, vp = viewport(layout.pos.row = 3,layout.pos.col = 1))
 ```
-
+<p>
+By looking at recency plot we see that last payments in most recent weeks are more than some weeks ago, which seems to be normal. Frequency plot gives us a clue that most users install between 3-8 apps from cafe bazaar.In Monetary plot we see histogram for users total payments.
+</p>
+```{r}
+quantile(RFM$TotalAmount,seq(0.5,1,by = 0.1))
+```
+<p>
+Getting quantiles from total payments shows that 50% of users won't pay for apps at all and 90% have paied less than 5900 tomans in their membership period.
+It's good to see how users pay for apps in average.
+</p>
 ```{r, echo=FALSE}
+avgPayDF <- payments  %>% filter(amount > 0)  %>% group_by(userID)  %>% summarise(count = n(), totalAmount = sum(amount)) %>% 
+      mutate(averageAmount = totalAmount %/% count)
+quant90Vals <- quantile(avgPayDF$averageAmount, c(0.05,0.95))
+
+avgPlot <- ggplot(avgPayDF, aes(x = averageAmount)) + geom_histogram(binwidth = 500)
+avgPlot <- avgPlot + labs(x = 'Average payment (Tomans)', y = 'Customer Count',title = 'Average payments')
+avgPlot <- avgPlot + geom_vline(xintercept=quant90Vals,color="red", linetype="dashed", size=1)
+print(avgPlot)
+```
+<p>
+This shows that 90% of users would pay an amount between `r quant90Vals[1]` and `r quant90Vals[2]` Tomans.  
+</p>
+## Customer Segmentation
+In this part we want to segment users
+```{r, echo=FALSE}
+summary(RFM$PayRatio)
+avgPayDF <- payments  %>% filter(amount > 0)  %>% group_by(userID)  %>% summarise(count = n(), totalAmount = sum(amount)) %>% 
+      mutate(averageAmount = totalAmount %/% count)
+quant90Vals <- quantile(avgPayDF$averageAmount, c(0.05,0.95))
+
+avgPlot <- ggplot(avgPayDF, aes(x = averageAmount)) + geom_histogram(binwidth = 500)
+avgPlot <- avgPlot + labs(x = 'Average payment (Tomans)', y = 'Customer Count',title = 'Average payments')
+avgPlot <- avgPlot + geom_vline(xintercept=quant90Vals,color="red", linetype="dashed", size=1)
+print(avgPlot)
+```
+```{r,echo=TRUE}
 RFM_Segs <- data.table(Recency_Week = as.numeric(LastDate - RFM$LastPurchaseDate) %/% 7)
-RFM_Segs$Recency <- ordered(ifelse(RFM_Segs$Recency_Week <= 30,"1-30",
-                                   ifelse(RFM_Segs$Recency_Week <= 50,"30-50",
-                                          ifelse(RFM_Segs$Recency_Week <= 60,"50-60",
-                                                 ifelse(RFM_Segs$Recency_Week <= 90,"60-90","90+")))),
-                            levels = c("1-30","30-50","50-60","60-90","90+"))
+RFM_Segs$Recency <- ordered(ifelse(RFM_Segs$Recency_Week <= 1,"0-1",
+                                   ifelse(RFM_Segs$Recency_Week <= 4,"1-4",
+                                          ifelse(RFM_Segs$Recency_Week <= 8,"4-8",
+                                                 ifelse(RFM_Segs$Recency_Week <= 10,"8-10","10+")))),
+                            levels = c('0-1','1-4','4-8','8-10','10+'))
 
-RFM_Segs$Frequency_count <- RFM$NumberOrders
-RFM_Segs$Frequency <- ordered(ifelse(RFM_Segs$Frequency <= 1,"0-1",
-                                     ifelse(RFM_Segs$Frequency <= 4,"2-4",
-                                            ifelse(RFM_Segs$Frequency <= 8,"5-8",
-                                                   ifelse(RFM_Segs$Frequency <= 10,"9-10","10+")))),
-                              levels = c("0-1","2-4","5-8","9-10","10+"))
+RFM_Segs$Frequency_count <- RFM$NumberofApps
+RFM_Segs$Frequency <- ordered(ifelse(RFM_Segs$Frequency_count <= 10,"0-10",
+                                     ifelse(RFM_Segs$Frequency_count <= 10-50,"10-50",
+                                            ifelse(RFM_Segs$Frequency_count <= 80,"50-80",
+                                                   ifelse(RFM_Segs$Frequency_count <= 100,"80-100",
+                                                          ifelse(RFM_Segs$Frequency_count <= 110,"100-110","110+"))))),
+                        levels = c("0-10","10-50","50-80","80-100","100-110","110+"))
 RFM_Segs$Monetary_Value <- RFM$TotalAmount
-RFM_Segs$Monetary <- ordered(ifelse(RFM_Segs$Monetary_Value <= 0,"0",
-                                     ifelse(RFM_Segs$Monetary_Value <= 1500,"0-1.5K",
-                                            ifelse(RFM_Segs$Monetary_Value <= 5000,"1.5K-5K",
-                                                   ifelse(RFM_Segs$Monetary_Value <= 10000,"5K-10K","10K+")))),
-                              levels = c("0","0-1.5K","1.5K-5K","5K-10K","10K+"))
+RFM_Segs$Monetary <- ordered(ifelse(RFM_Segs$Monetary_Value <= 1000,"0-1K",
+                                    ifelse(RFM_Segs$Monetary_Value <= 10000,"1K-10K",
+                                           ifelse(RFM_Segs$Monetary_Value <= 30000,"10K-30K",
+                                                  ifelse(RFM_Segs$Monetary_Value <= 50000,"30K-50K","50K+")))),
+                             levels = c("0-1K","1K-10K","10K-50K","10K-30K","30K-50K","50K+"))
 
 
-RFM_Segs$Breadth_count <- RFM$TypeCount
-RFM_Segs$Breadth <-  ordered(ifelse(RFM_Segs$Breadth_count <= 1,"1","2"),
-                             levels = c("1","2"))
-
+# RFM_Segs$Breadth_count <- RFM$TypeCount
+# RFM_Segs$Breadth <-  ordered(ifelse(RFM_Segs$Breadth_count <= 1,"1","2"),
+#                              levels = c("1","2"))
+# 
 RFM_Segs$Tenure_weeks <- as.numeric(LastDate - RFM$FirstPurchaseDate) %/% 7
-RFM_Segs$Tenure <- ordered(ifelse(RFM_Segs$Monetary_Value <= 2,"0-2",
-                                  ifelse(RFM_Segs$Monetary_Value <= 10,"2-10",
-                                         ifelse(RFM_Segs$Monetary_Value <= 75,"10-75",
-                                                ifelse(RFM_Segs$Monetary_Value <= 110,"75-110","110+")))),
-                           levels = c("0-2","2-10","10-75","75-110","110+"))
+RFM_Segs$Tenure <- ordered(ifelse(RFM_Segs$Monetary_Value <= 140,"0-140",
+                                        ifelse(RFM_Segs$Monetary_Value <= 150,"140-150",
+                                         ifelse(RFM_Segs$Monetary_Value <= 155,"150-155","155+"))),
+                           levels = c("0-140","140-150","150-155","155+"))
+
+summary(RFM_Segs)
 
 ```
-```{r,echo=FALSE}
-P1 <- ggplot(RFM_Segs, aes(Recency,Frequency))
-P1 <- P1 +  geom_point(aes(size = Monetary_Value,colour = 'pink'))
-print(P1)
+
+```{r, echo=TRUE}
+RFM_Values <- select(RFM_Segs,Recency_Week,Frequency_count,Monetary_Value)
+# Normalize Data for Clustering
+ normalVec = function(x){
+      (x - min(x)) / (max(x)-min(x))
+ }
+ 
+normRFM <- sapply(RFM_Values, FUN = normalVec)
+clustRes <- kmeans(normRFM,3)
+
+P2 <- ggplot(RFM_Segs,aes(Recency_Week,Frequency_count))
+P2 <- P2 +  geom_point(aes(size = Monetary_Value,colour = factor(clustRes$cluster)),alpha = 0.1)
+print(P2)
+
+```
+
+```{r, echo=TRUE}
+goodUsers <- RFM$userID[which(clustRes$cluster == 2)]
+
+appRates <- colMeans(ratings[goodUsers,],na.rm = TRUE)
+top10 <- sort(appRates,decreasing = TRUE, index.return=TRUE)$ix[1:10]
+print(top10)
+
+```
+
+```{r, echo=TRUE}
+trainIndex <- which(clustRes$cluster == 2)
+affinityMatrix<- as(ratings,"realRatingMatrix")
+recModel<-Recommender(affinityMatrix[trainIndex], method = "UBCF")
+```
+
+```{r, echo=TRUE}
+testIndex <- sample(which(clustRes$cluster != 2),10)
+# NMF Analysis
+recom <- predict(recModel, affinityMatrix[testIndex,], type="ratings")
+recomMat <- as(recom,"matrix")
+get10 <- function(x){
+      sort(x,decreasing = TRUE, index.return = TRUE)$ix[1:10]
+}
+
+res  <- apply(recomMat, MARGIN = 1, FUN = get10)
+resTbl <- data.table(userID = testIndex,res)
+print(resTbl)
 ```
